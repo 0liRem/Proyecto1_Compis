@@ -67,6 +67,7 @@ FRIENDLY_TOKENS = {
     "'false'": "el literal booleano 'false'",
     "'boolean'": "el tipo 'boolean'",
     "'integer'": "el tipo 'integer'",
+    "'float'": "el tipo 'float'",
     "'string'": "el tipo 'string'",
     # Tokens no literales
     "Identifier": "un identificador (nombre de variable, función o clase)",
@@ -172,8 +173,6 @@ _LEXER_RE = re.compile(r"^token recognition error at: '(.*)'$", re.DOTALL)
 
 
 def translate_lexer_msg(msg: str):
-    """Traduce un mensaje léxico crudo de ANTLR a una descripción clara en
-    español. Devuelve una tupla (descripcion, lexema)."""
     m = _LEXER_RE.match(msg)
     if m:
         texto = m.group(1)
@@ -199,13 +198,11 @@ def translate_lexer_msg(msg: str):
 
 
 class CompiscriptError:
-    """Representa un único error léxico o sintáctico ya traducido y listo
-    para mostrarse al usuario."""
 
     def __init__(self, tipo, linea, columna, simbolo, descripcion):
-        self.tipo = tipo                # "Léxico" | "Sintáctico"
-        self.linea = linea              # número de línea (1-based, tal como lo entrega ANTLR)
-        self.columna = columna + 1      # ANTLR reporta columna 0-based; la mostramos 1-based
+        self.tipo = tipo                
+        self.linea = linea              
+        self.columna = columna + 1     
         self.simbolo = simbolo if simbolo else "(sin símbolo)"
         self.descripcion = descripcion
 
@@ -223,14 +220,10 @@ class CompiscriptError:
         }
 
 
-# Listeners de error
+
 
 class LexicalErrorListener(ErrorListener):
-    """Escucha los errores del lexer. No detiene el análisis: el propio
-    lexer generado por ANTLR ya se recupera automáticamente saltando el
-    carácter (o la cadena de texto) que no pudo reconocer y continúa
-    escaneando el resto del archivo."""
-
+    #Sigue analizando a pesar de error
     def __init__(self):
         super().__init__()
         self.errores = []
@@ -262,7 +255,7 @@ class SyntaxErrorListener(ErrorListener):
 
 
 
-#Estrategia de recuperación sintáctica en modo pánico
+
 
 
 class RecoveryErrorStrategy(DefaultErrorStrategy):

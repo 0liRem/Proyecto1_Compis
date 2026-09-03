@@ -1,21 +1,40 @@
-# -*- coding: utf-8 -*-
+"""
+    Parte Visual
+    Creada con ayuda de ChatGPT
+    Utiliza tkinter y ttk para toda la UI
+    
 
+
+
+"""
 
 import os
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+_GENERATED_DIR = os.path.join(_THIS_DIR, "generated")
+for _p in (_THIS_DIR, _GENERATED_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from analyzer import analizar_texto  # noqa: E402
+from CompiscriptParser import CompiscriptParser  # noqa: E402
+from semantic.tree_view import export_tree_image  # noqa: E402
+from semantic.symbols import VariableSymbol, FunctionSymbol, ClassSymbol  # noqa: E402
+
+try:
+    from PIL import Image, ImageTk  # noqa: E402
+    _PIL_OK = True
+except Exception:  # noqa: BLE001
+    _PIL_OK = False
 
 
-APP_TITLE = "Analizador de Compiscript — Léxico y Sintáctico"
+APP_TITLE = "Analizador de Compiscript — Léxico, Sintáctico y Semántico"
 
 
 class CompiscriptGUI(tb.Window):
@@ -44,16 +63,38 @@ class CompiscriptGUI(tb.Window):
         titulo.pack(side=LEFT)
 
         self.btn_abrir = tb.Button(
-            barra, text="📂 Seleccionar archivo .cps",
+            barra, text="📂 Abrir .cps",
             bootstyle=PRIMARY, command=self.seleccionar_archivo
         )
         self.btn_abrir.pack(side=RIGHT, padx=(8, 0))
+
+        self.btn_nuevo = tb.Button(
+            barra, text="📄 Nuevo", bootstyle=SECONDARY, command=self.nuevo_archivo
+        )
+        self.btn_nuevo.pack(side=RIGHT, padx=(8, 0))
+
+        self.btn_guardar = tb.Button(
+            barra, text="💾 Guardar", bootstyle=SECONDARY, command=self.guardar_archivo
+        )
+        self.btn_guardar.pack(side=RIGHT, padx=(8, 0))
 
         self.btn_analizar = tb.Button(
             barra, text="▶ Analizar", bootstyle=SUCCESS,
             command=self.analizar, state=DISABLED
         )
         self.btn_analizar.pack(side=RIGHT, padx=(8, 0))
+
+        self.btn_arbol = tb.Button(
+            barra, text="🌳 Ver árbol sintáctico", bootstyle=INFO,
+            command=self.mostrar_arbol, state=DISABLED
+        )
+        self.btn_arbol.pack(side=RIGHT, padx=(8, 0))
+
+        self.btn_simbolos = tb.Button(
+            barra, text="🔤 Tabla de símbolos", bootstyle=WARNING,
+            command=self.mostrar_tabla_simbolos, state=DISABLED
+        )
+        self.btn_simbolos.pack(side=RIGHT, padx=(8, 0))
 
         self.lbl_archivo = tb.Label(
             self, text="Ningún archivo seleccionado.", padding=(12, 0),
@@ -119,7 +160,7 @@ class CompiscriptGUI(tb.Window):
         self.filtro_var = tk.StringVar(value="Todos")
         self.filtro_combo = tb.Combobox(
             filtro_frame, textvariable=self.filtro_var,
-            values=["Todos", "Léxico", "Sintáctico"], state="readonly", width=14
+            values=["Todos", "Léxico", "Sintáctico", "Semántico"], state="readonly", width=14
         )
         self.filtro_combo.pack(side=LEFT)
         self.filtro_combo.bind("<<ComboboxSelected>>", lambda e: self._refrescar_tabla())
@@ -144,6 +185,7 @@ class CompiscriptGUI(tb.Window):
 
         self.tabla.tag_configure("Léxico", foreground="#b8860b")
         self.tabla.tag_configure("Sintáctico", foreground="#b02a37")
+        self.tabla.tag_configure("Semántico", foreground="#5a3d9e")
 
         scroll_tabla = tb.Scrollbar(panel_resultados, orient=VERTICAL, command=self.tabla.yview)
         self.tabla.configure(yscrollcommand=scroll_tabla.set)
@@ -184,6 +226,41 @@ class CompiscriptGUI(tb.Window):
         self.num_lineas.configure(state=DISABLED)
 
 
+    def nuevo_archivo(self):
+        self.ruta_actual = None
+        self.codigo_actual = ""
+        self.txt_codigo.delete("1.0", "end")
+        self._actualizar_numeros_linea()
+        self.lbl_archivo.configure(text="Archivo nuevo (sin guardar).")
+        self.btn_analizar.configure(state=NORMAL)
+        self.btn_arbol.configure(state=DISABLED)
+        self.btn_simbolos.configure(state=DISABLED)
+        self._errores = []
+        self._resultado = None
+        self._refrescar_tabla()
+        self.lbl_resumen.configure(text="")
+        self.status.configure(text="Nuevo archivo. Escribe tu código y presiona “Analizar”.")
+
+    def guardar_archivo(self):
+        ruta = self.ruta_actual
+        if not ruta:
+            ruta = filedialog.asksaveasfilename(
+                title="Guardar archivo Compiscript",
+                defaultextension=".cps",
+                filetypes=[("Archivos Compiscript", "*.cps"), ("Todos los archivos", "*.*")],
+            )
+            if not ruta:
+                return
+        try:
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(self.txt_codigo.get("1.0", "end-1c"))
+        except Exception as ex:
+            messagebox.showerror("Error al guardar", str(ex))
+            return
+        self.ruta_actual = ruta
+        self.lbl_archivo.configure(text=f"Archivo: {ruta}")
+        self.status.configure(text="Archivo guardado.")
+
     def seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(
             title="Selecciona un archivo Compiscript",
@@ -206,7 +283,10 @@ class CompiscriptGUI(tb.Window):
 
         self.lbl_archivo.configure(text=f"Archivo: {ruta}")
         self.btn_analizar.configure(state=NORMAL)
+        self.btn_arbol.configure(state=DISABLED)
+        self.btn_simbolos.configure(state=DISABLED)
         self._errores = []
+        self._resultado = None
         self._refrescar_tabla()
         self.lbl_resumen.configure(text="")
         self.status.configure(text="Archivo cargado. Presiona “Analizar” para comenzar.")
@@ -227,6 +307,9 @@ class CompiscriptGUI(tb.Window):
             return
 
         self._errores = resultado.errores
+        self._resultado = resultado
+        self.btn_arbol.configure(state=NORMAL if resultado.arbol is not None else DISABLED)
+        self.btn_simbolos.configure(state=NORMAL if resultado.tabla_simbolos is not None else DISABLED)
         self._refrescar_tabla()
         self._resaltar_lineas_con_error()
 
@@ -237,13 +320,15 @@ class CompiscriptGUI(tb.Window):
             )
             self.status.configure(
                 text="El archivo fue analizado correctamente. "
-                     "No se encontraron errores léxicos ni sintácticos."
+                     "No se encontraron errores léxicos, sintácticos ni semánticos."
             )
         else:
             n_lex = len(resultado.errores_lexicos)
             n_sin = len(resultado.errores_sintacticos)
+            n_sem = len(resultado.errores_semanticos)
             self.lbl_resumen.configure(
-                text=f" {n} error(es) — {n_lex} léxico(s), {n_sin} sintáctico(s)",
+                text=f" {n} error(es) — {n_lex} léxico(s), {n_sin} sintáctico(s), "
+                     f"{n_sem} semántico(s)",
             )
             self.status.configure(
                 text=f"Análisis finalizado: se encontraron {n} error(es)."
@@ -272,6 +357,188 @@ class CompiscriptGUI(tb.Window):
                 self.txt_codigo.tag_add("linea_error", inicio, fin)
             except tk.TclError:
                 pass
+
+    def mostrar_tabla_simbolos(self):
+        """Muestra la tabla de símbolos y el historial de operaciones semánticas."""
+        resultado = getattr(self, "_resultado", None)
+        symtab = getattr(resultado, "tabla_simbolos", None) if resultado else None
+        if symtab is None:
+            messagebox.showinfo(
+                "Tabla de símbolos no disponible",
+                "Primero analiza un programa correctamente para construir la tabla."
+            )
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Tabla de símbolos — inserción, recuperación, actualización y alcances")
+        ventana.geometry("1180x700")
+        ventana.minsize(900, 500)
+
+        cab = tb.Frame(ventana, padding=12)
+        cab.pack(fill=X)
+        tb.Label(
+            cab, text="Tabla de símbolos",
+            font=("Segoe UI", 15, "bold")
+        ).pack(side=LEFT)
+        tb.Label(
+            cab,
+            text="  INSERTAR · RECUPERAR · ACTUALIZAR · ENTRAR/SALIR DE ALCANCE",
+            bootstyle=SECONDARY,
+            font=("Segoe UI", 9)
+        ).pack(side=LEFT, padx=12)
+
+        notebook = tb.Notebook(ventana)
+        notebook.pack(fill=BOTH, expand=YES, padx=12, pady=(0, 12))
+
+        # --- Símbolos por alcance ---
+        tab_simbolos = tb.Frame(notebook, padding=8)
+        notebook.add(tab_simbolos, text="  Símbolos por alcance  ")
+
+        columnas = ("alcance", "nombre", "categoria", "tipo", "estado", "linea", "columna")
+        tabla = tb.Treeview(tab_simbolos, columns=columnas, show="headings", bootstyle=INFO)
+        encabezados = {
+            "alcance": "Alcance",
+            "nombre": "Nombre",
+            "categoria": "Categoría",
+            "tipo": "Tipo",
+            "estado": "Estado",
+            "linea": "Línea",
+            "columna": "Columna",
+        }
+        anchos = {"alcance": 260, "nombre": 150, "categoria": 120, "tipo": 180,
+                  "estado": 170, "linea": 60, "columna": 70}
+        for col in columnas:
+            tabla.heading(col, text=encabezados[col])
+            tabla.column(col, width=anchos[col], anchor=CENTER if col in ("linea", "columna") else W)
+
+        scroll = tb.Scrollbar(tab_simbolos, orient=VERTICAL, command=tabla.yview)
+        tabla.configure(yscrollcommand=scroll.set)
+        tabla.pack(side=LEFT, fill=BOTH, expand=YES)
+        scroll.pack(side=RIGHT, fill=Y)
+
+        def llenar_scope(scope, ruta=None):
+            ruta = (ruta or []) + [scope.label or scope.kind]
+            nombre_alcance = " / ".join(ruta)
+            for sym in scope.symbols.values():
+                if isinstance(sym, VariableSymbol):
+                    categoria = "Constante" if sym.is_const else "Variable"
+                    estado = "Inicializada" if sym.initialized else "No inicializada"
+                elif isinstance(sym, FunctionSymbol):
+                    categoria = "Función / método"
+                    params = ", ".join(f"{n}: {t}" for n, t in zip(sym.param_names, sym.param_types))
+                    estado = f"Parámetros: ({params})"
+                elif isinstance(sym, ClassSymbol):
+                    categoria = "Clase"
+                    estado = f"Hereda de: {sym.superclass.name}" if sym.superclass else "Sin herencia"
+                else:
+                    categoria = type(sym).__name__
+                    estado = "-"
+                tabla.insert("", "end", values=(
+                    nombre_alcance, sym.name, categoria,
+                    str(sym.type) if sym.type is not None else "-",
+                    estado, sym.line, sym.col
+                ))
+            for child in scope.children:
+                llenar_scope(child, ruta)
+
+        llenar_scope(symtab.global_scope)
+
+        # --- Historial de operaciones ---
+        tab_ops = tb.Frame(notebook, padding=8)
+        notebook.add(tab_ops, text="  Operaciones realizadas  ")
+
+        columnas_ops = ("operacion", "nombre", "tipo", "alcance", "resultado")
+        tabla_ops = tb.Treeview(tab_ops, columns=columnas_ops, show="headings", bootstyle=WARNING)
+        encabezados_ops = {
+            "operacion": "Operación",
+            "nombre": "Símbolo",
+            "tipo": "Tipo",
+            "alcance": "Alcance",
+            "resultado": "Resultado / cambio",
+        }
+        for col in columnas_ops:
+            tabla_ops.heading(col, text=encabezados_ops[col])
+            tabla_ops.column(col, width={"operacion": 170, "nombre": 150, "tipo": 180,
+                                         "alcance": 330, "resultado": 260}[col],
+                             anchor=W)
+
+        scroll_ops = tb.Scrollbar(tab_ops, orient=VERTICAL, command=tabla_ops.yview)
+        tabla_ops.configure(yscrollcommand=scroll_ops.set)
+        tabla_ops.pack(side=LEFT, fill=BOTH, expand=YES)
+        scroll_ops.pack(side=RIGHT, fill=Y)
+
+        for op in symtab.operation_log:
+            tabla_ops.insert("", "end", values=(
+                op["operation"], op["name"], op["type"], op["scope"], op["result"]
+            ))
+
+        pie = tb.Frame(ventana, padding=(12, 0, 12, 10))
+        pie.pack(fill=X)
+        tb.Label(
+            pie,
+            text="El alcance se lee de izquierda a derecha: global / función / bloque. "
+                 "La recuperación busca primero en el alcance actual y luego en sus padres.",
+            bootstyle=SECONDARY,
+            wraplength=1000
+        ).pack(side=LEFT)
+
+    def mostrar_arbol(self):
+        if not getattr(self, "_resultado", None) or self._resultado.arbol is None:
+            messagebox.showinfo(
+                "Árbol sintáctico no disponible",
+                "No hay un árbol sintáctico para mostrar (el programa no "
+                "pudo analizarse sintácticamente)."
+            )
+            return
+        if not _PIL_OK:
+            messagebox.showerror(
+                "Falta una dependencia",
+                "Se requiere el paquete 'Pillow' (PIL) para mostrar el "
+                "árbol dentro de la aplicación. Instálalo con:\n\n"
+                "    pip install Pillow"
+            )
+            return
+
+        self.status.configure(text="Generando la representación visual del árbol…")
+        self.update_idletasks()
+        try:
+            tmp_base = os.path.join(tempfile.gettempdir(), "compiscript_arbol")
+            titulo = f"Árbol sintáctico — {os.path.basename(self.ruta_actual or '<sin nombre>')}"
+            ruta_png = export_tree_image(
+                self._resultado.arbol, CompiscriptParser, tmp_base, formato="png", titulo=titulo
+            )
+        except Exception as ex:
+            messagebox.showerror(
+                "No se pudo generar el árbol",
+                f"Ocurrió un error generando la imagen del árbol (¿está "
+                f"instalado Graphviz en el sistema?):\n\n{ex}"
+            )
+            self.status.configure(text="No se pudo generar el árbol.")
+            return
+
+        imagen = Image.open(ruta_png)
+        ventana = tk.Toplevel(self)
+        ventana.title("Árbol sintáctico")
+        ventana.geometry("1000x700")
+
+        contenedor = tb.Frame(ventana)
+        contenedor.pack(fill=BOTH, expand=YES)
+
+        canvas = tk.Canvas(contenedor, background="#ffffff")
+        scroll_y = tb.Scrollbar(contenedor, orient=VERTICAL, command=canvas.yview)
+        scroll_x = tb.Scrollbar(contenedor, orient=HORIZONTAL, command=canvas.xview)
+        canvas.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        scroll_y.pack(side=RIGHT, fill=Y)
+        scroll_x.pack(side=BOTTOM, fill=X)
+        canvas.pack(side=LEFT, fill=BOTH, expand=YES)
+
+        foto = ImageTk.PhotoImage(imagen)
+        canvas.create_image(0, 0, anchor="nw", image=foto)
+        canvas.image = foto  # evita que el garbage collector la elimine
+        canvas.configure(scrollregion=(0, 0, imagen.width, imagen.height))
+
+        self.status.configure(text="Árbol sintáctico generado.")
 
     def _on_seleccionar_error(self, event=None):
         seleccion = self.tabla.selection()
