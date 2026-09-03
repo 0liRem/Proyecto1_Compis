@@ -8,6 +8,13 @@ REM en src\generated\.
 REM
 REM
 REM Requisitos: Java (JRE 11 o superior) instalado y en el PATH.
+REM
+REM Nota de versiones: este proyecto se generó y probó con ANTLR 4.11.1
+REM (antlr4-python3-runtime==4.11.1 en requirements.txt). antlr4-tools
+REM descarga la última version de ANTLR disponible, que puede no coincidir.
+REM Si al regenerar el parser la aplicacion falla por incompatibilidad de
+REM version, instala el runtime de Python que corresponda, por ejemplo:
+REM   pip install antlr4-python3-runtime==^<version-usada-por-antlr4-tools^>
 REM ---------------------------------------------------------------------
 
 where java >nul 2>nul
