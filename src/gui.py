@@ -85,16 +85,22 @@ class CompiscriptGUI(tb.Window):
         self.btn_analizar.pack(side=RIGHT, padx=(8, 0))
 
         self.btn_arbol = tb.Button(
-            barra, text="🌳 Ver árbol sintáctico", bootstyle=INFO,
+            barra, text="Ver árbol sintáctico", bootstyle=INFO,
             command=self.mostrar_arbol, state=DISABLED
         )
         self.btn_arbol.pack(side=RIGHT, padx=(8, 0))
 
         self.btn_simbolos = tb.Button(
-            barra, text="🔤 Tabla de símbolos", bootstyle=WARNING,
+            barra, text="Tabla de símbolos", bootstyle=WARNING,
             command=self.mostrar_tabla_simbolos, state=DISABLED
         )
         self.btn_simbolos.pack(side=RIGHT, padx=(8, 0))
+
+        self.btn_tac = tb.Button(
+            barra, text="Código intermedio", bootstyle=DARK,
+            command=self.mostrar_codigo_intermedio, state=DISABLED
+        )
+        self.btn_tac.pack(side=RIGHT, padx=(8, 0))
 
         self.lbl_archivo = tb.Label(
             self, text="Ningún archivo seleccionado.", padding=(12, 0),
@@ -235,6 +241,7 @@ class CompiscriptGUI(tb.Window):
         self.btn_analizar.configure(state=NORMAL)
         self.btn_arbol.configure(state=DISABLED)
         self.btn_simbolos.configure(state=DISABLED)
+        self.btn_tac.configure(state=DISABLED)
         self._errores = []
         self._resultado = None
         self._refrescar_tabla()
@@ -285,6 +292,7 @@ class CompiscriptGUI(tb.Window):
         self.btn_analizar.configure(state=NORMAL)
         self.btn_arbol.configure(state=DISABLED)
         self.btn_simbolos.configure(state=DISABLED)
+        self.btn_tac.configure(state=DISABLED)
         self._errores = []
         self._resultado = None
         self._refrescar_tabla()
@@ -310,6 +318,7 @@ class CompiscriptGUI(tb.Window):
         self._resultado = resultado
         self.btn_arbol.configure(state=NORMAL if resultado.arbol is not None else DISABLED)
         self.btn_simbolos.configure(state=NORMAL if resultado.tabla_simbolos is not None else DISABLED)
+        self.btn_tac.configure(state=NORMAL if resultado.codigo_intermedio is not None else DISABLED)
         self._refrescar_tabla()
         self._resaltar_lineas_con_error()
 
@@ -481,6 +490,42 @@ class CompiscriptGUI(tb.Window):
             bootstyle=SECONDARY,
             wraplength=1000
         ).pack(side=LEFT)
+
+    def mostrar_codigo_intermedio(self):
+        """Muestra el código de tres direcciones y el mapa de direcciones
+        (registros de activación) generados para el programa."""
+        resultado = getattr(self, "_resultado", None)
+        if not resultado or resultado.codigo_intermedio is None:
+            messagebox.showinfo(
+                "Código intermedio no disponible",
+                "El código intermedio sólo se genera cuando el programa no "
+                "tiene errores léxicos, sintácticos ni semánticos."
+            )
+            return
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Código intermedio (TAC)")
+        ventana.geometry("980x680")
+
+        notebook = tb.Notebook(ventana)
+        notebook.pack(fill=BOTH, expand=YES, padx=12, pady=12)
+
+        def pestana(titulo, texto):
+            marco = tb.Frame(notebook, padding=6)
+            notebook.add(marco, text=titulo)
+            caja = tk.Text(marco, wrap="none", font=("Consolas", 10),
+                           background="#ffffff", foreground="#212529")
+            sy = tb.Scrollbar(marco, orient=VERTICAL, command=caja.yview)
+            sx = tb.Scrollbar(marco, orient=HORIZONTAL, command=caja.xview)
+            caja.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+            sy.pack(side=RIGHT, fill=Y)
+            sx.pack(side=BOTTOM, fill=X)
+            caja.pack(side=LEFT, fill=BOTH, expand=YES)
+            caja.insert("1.0", texto)
+            caja.configure(state=DISABLED)
+
+        pestana("  Código de tres direcciones  ", resultado.codigo_intermedio.to_text())
+        pestana("  Direcciones y registros de activación  ", resultado.reporte_activacion.to_text())
 
     def mostrar_arbol(self):
         if not getattr(self, "_resultado", None) or self._resultado.arbol is None:

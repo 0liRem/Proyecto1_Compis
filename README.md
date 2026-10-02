@@ -312,3 +312,92 @@ Referencias:
    Claude: Reorganización de codigo, estructuración del proyecto y gramatica de los errores (la parte que los tokens se lean en idioma humano) \
    ChatGPT: Reestructuración del readme.md \
    Gemini: Creación de los ejemplos semanticos 
+
+## Generación de código intermedio
+
+
+Esta fase toma el árbol y la tabla de símbolos ya validados por el análisis
+semántico y produce **código de tres direcciones (TAC)**.
+
+## 1. Arquitectura
+
+```
+texto → Lexer/Parser (ANTLR) → SemanticChecker → build_activation_records → TACGenerator → ProgramaTAC
+                                  (tipos + símbolos    (direcciones, etiquetas,   (lee anotaciones,
+                                   anotados en el árbol)  tamaño de marcos)        emite instrucciones)
+```
+
+| Módulo | Responsabilidad |
+|---|---|
+| `src/semantic/checker.py` | Además de validar, anota cada nodo con `ctx.tac_tipo` / `ctx.tac_ref` y registra el símbolo de cada declaración/asignación (`get_declared_symbol`). Así el generador **no repite** la resolución de ámbitos ni de tipos. |
+| `src/ir/activation.py` | Complementa la tabla de símbolos con direcciones y registros de activación. |
+| `src/ir/temp_manager.py` | Asignación y reciclaje de temporales. |
+| `src/ir/tac.py` | Instrucciones TAC y su impresión. |
+| `src/ir/generator.py` | Recorrido que traduce el árbol a TAC. |
+
+
+
+## 2. Lenguaje intermedio
+
+Cada instrucción es un cuádruplo (operador, argumentos, destino). Las
+variables del programa aparecen con su nombre; los temporales son `t0, t1, …`;
+las etiquetas son `L0, L1, …`.
+
+| Instrucción | Significado |
+|---|---|
+| `x = y` | copia |
+| `t = a op b` | `op` ∈ `+ - * / % == != < <= > >=` |
+| `t = -a`, `t = !a` | unarios |
+| `t = (float) a` | conversión integer → float |
+| `L:` / `goto L` | etiqueta / salto |
+| `if a goto L` / `ifFalse a goto L` | salto condicional |
+| `param a` | argumento de la próxima llamada |
+| `t = call f, n` / `call f, n` | llamada con `n` parámetros (sin destino si es `void`) |
+| `return a` / `return` | retorno |
+| `t = newarray n` | crea arreglo de `n` elementos |
+| `t = a[i]` / `a[i] = v` | lectura / escritura de arreglo |
+| `t = length(a)` | longitud de un arreglo |
+| `t = new C` | reserva un objeto de la clase `C` |
+| `t = o.campo` / `o.campo = v` | lectura / escritura de atributo |
+| `t = <no-local> x (definida en 'f')` | acceso a variable de una función externa (closure) |
+| `print a` | impresión |
+| `func f:` … `endfunc f` | inicio/fin de función (el comentario indica el tamaño del marco) |
+| `; texto` | marcador (usado en `try/catch`) |
+
+Los literales `true`/`false` se emiten como `1`/`0`.
+
+## 3. Algoritmo de temporales
+
+Pila de temporales libres:
+
+- `nuevo()` devuelve un temporal libre de la pila o crea el siguiente (`tN`).
+- `liberar(t)` lo devuelve a la pila. Solo se reciclan temporales; los nombres
+  de variables reales se ignoran.
+- El generador libera cada operando en cuanto la instrucción que lo consume
+  ya se emitió.
+- Métricas: `max_live` (pico de temporales simultáneos) y `total_creados`.
+  `max_live` define el espacio de temporales que se reserva en el marco.
+- Cada función reinicia el gestor (`reiniciar()`).
+
+## 4. Tabla de símbolos y registros de activación
+
+`build_activation_records` agrega atributos a los mismos `Symbol` de la tabla:
+
+| Atributo | Aplica a | Significado |
+|---|---|---|
+| `tac_storage` | variables | `global`, `param`, `local` o `field` |
+| `tac_offset` | variables | desplazamiento dentro del área global, el marco o la instancia |
+| `tac_name` | variables | nombre único en TAC (las variables sombreadas reciben sufijo `$n`) |
+| `tac_owner_function` | params/locales | función dueña del marco |
+| `tac_label` | funciones | etiqueta única (`f`, `Clase_metodo`, `externa__interna`) |
+| `tac_param_area_size`, `tac_locals_size`, `tac_temp_area_size`, `tac_frame_size` | funciones | tamaños del registro de activación |
+| `tac_instance_size` | clases | tamaño de una instancia |
+
+Convenciones: `WORD_SIZE = 4`; todo escalar y toda referencia (string, arreglo,
+objeto) ocupa una palabra. Los parámetros van primero en el marco; en un método
+`this` ocupa el offset 0. Las locales (incluidas las de bloques anidados) tienen
+cada una su offset propio. Las globales se numeran en orden de declaración. En
+clases con herencia los campos heredados van primero.
+
+El marco final = parámetros + locales + `max_live × WORD_SIZE`.
+El IDE muestra todo esto en **Código intermedio → Direcciones y registros de activación**.

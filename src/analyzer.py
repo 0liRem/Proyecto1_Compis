@@ -25,16 +25,20 @@ from error_handling import (
     CompiscriptError,
 )
 from semantic.checker import analizar_semantica  
+from ir.generator import generar_tac  # noqa: E402
 
 
 class ResultadoAnalisis:
     #Compscript
 
-    def __init__(self, nombre_archivo, errores, arbol=None, tabla_simbolos=None):
+    def __init__(self, nombre_archivo, errores, arbol=None, tabla_simbolos=None,
+                 codigo_intermedio=None, reporte_activacion=None):
         self.nombre_archivo = nombre_archivo
         
         self.errores = sorted(errores, key=lambda e: (e.linea, e.columna))
         self.arbol = arbol
+        self.codigo_intermedio = codigo_intermedio    # ProgramaTAC o None (sólo si no hubo errores)
+        self.reporte_activacion = reporte_activacion  # ActivationReport o None
         self.tabla_simbolos = tabla_simbolos  # Revisa si se existe la tabla de simbolos (none y sigue si explota)
 
     def tiene_errores(self):
@@ -104,11 +108,17 @@ def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoA
 
 
     tabla_simbolos = None
+    codigo_intermedio = None
+    reporte_activacion = None
     if arbol is not None:
         try:
             checker = analizar_semantica(arbol)
             errores = errores + checker.errors.errores
             tabla_simbolos = checker.symtab
+            # Generación de código intermedio: sólo si el programa está
+            # libre de errores léxicos, sintácticos y semánticos.
+            if not errores:
+                codigo_intermedio, reporte_activacion = generar_tac(arbol, checker)
         except RecursionError:
             errores = errores + [
                 CompiscriptError(
@@ -127,7 +137,8 @@ def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoA
                 )
             ]
 
-    return ResultadoAnalisis(nombre_archivo, errores, arbol, tabla_simbolos)
+    return ResultadoAnalisis(nombre_archivo, errores, arbol, tabla_simbolos,
+                             codigo_intermedio, reporte_activacion)
 
 
 def analizar_archivo(path: str) -> ResultadoAnalisis:
@@ -144,6 +155,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     resultado = analizar_archivo(sys.argv[1])
+    if not resultado.tiene_errores() and resultado.codigo_intermedio is not None:
+        print("=== Código intermedio (TAC) ===")
+        print(resultado.codigo_intermedio.to_text())
+        print()
+        print(resultado.reporte_activacion.to_text())
+        print()
     if not resultado.tiene_errores():
         print(f"El archivo '{resultado.nombre_archivo}' fue analizado "
               f"correctamente. No se encontraron errores léxicos, "

@@ -27,6 +27,8 @@ for _p in (_SRC_DIR, _GENERATED_DIR, _THIS_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from antlr4 import ParserRuleContext
+
 from CompiscriptParser import CompiscriptParser 
 from CompiscriptVisitor import CompiscriptVisitor 
 
@@ -59,6 +61,30 @@ class SemanticChecker(CompiscriptVisitor):
         self._predeclare_block(statements, self.symtab.global_scope)
         self._run_statements(statements)
         return self.errors
+
+    # ------------------------------------------------------------------
+    # Instrumentación para la fase de generación de código intermedio
+    # ------------------------------------------------------------------
+    # El checker ya calcula, para cada nodo de expresión, su tipo (y su
+    # símbolo/referente cuando aplica) al validarlo. En vez de duplicar esa
+    # resolución de ámbitos en un segundo recorrido, se anota el resultado
+    # directamente sobre el propio nodo del árbol (`ctx.tac_tipo`,
+    # `ctx.tac_ref`) la primera vez que se visita. `ir/generator.py` sólo
+    # lee estas anotaciones — no vuelve a resolver nombres ni tipos.
+    def visit(self, tree):
+        resultado = super().visit(tree)
+        if isinstance(tree, ParserRuleContext):
+            if isinstance(resultado, tuple) and len(resultado) == 2 and hasattr(resultado[0], "is_error"):
+                tree.tac_tipo, tree.tac_ref = resultado
+            elif hasattr(resultado, "is_error"):
+                tree.tac_tipo = resultado
+        return resultado
+
+    def get_declared_symbol(self, ctx):
+        """Símbolo (Function/Class/Variable) asociado a un nodo de
+        declaración o de asignación, previamente registrado en
+        `_declared_ctx`. Usado por `ir/generator.py`."""
+        return self._declared_ctx.get(id(ctx))
 
 
 #utility tipos
@@ -133,6 +159,7 @@ class SemanticChecker(CompiscriptVisitor):
         fsym = FunctionSymbol(name, param_types, param_names, return_type, tok.line, tok.column)
         fsym.scope = fscope
         fsym.owner_class = owner_class
+        fsym.ctx = fctx  # referencia al nodo de la declaración (usado por ir/generator.py)
         self._scope_to_function[id(fscope)] = fsym
         return fsym
 
@@ -324,6 +351,7 @@ class SemanticChecker(CompiscriptVisitor):
             sym = VariableSymbol(name, final_type, tok.line, tok.column)
             if not self.symtab.insert(sym):
                 self.errors.report(ctx, f"'{name}' ya fue declarado en este ámbito.", symbol=name)
+            self._declared_ctx[id(ctx)] = sym
 
         if declared_type is not None and init_type is not None and not is_assignable(declared_type, init_type):
             self.errors.report(
@@ -351,6 +379,7 @@ class SemanticChecker(CompiscriptVisitor):
             sym = VariableSymbol(name, final_type, tok.line, tok.column, is_const=True)
             if not self.symtab.insert(sym):
                 self.errors.report(ctx, f"'{name}' ya fue declarado en este ámbito.", symbol=name)
+        self._declared_ctx[id(ctx)] = sym
         self.symtab.update(sym, initialized=True)
 
         if declared_type is not None and not is_assignable(declared_type, init_type):
@@ -388,6 +417,7 @@ class SemanticChecker(CompiscriptVisitor):
                     symbol=name,
                 )
             self.symtab.update(sym, initialized=True)
+            self._declared_ctx[id(ctx)] = sym
             return sym.type
         else:
             obj_type = self.visit(exprs[0])
@@ -535,6 +565,7 @@ class SemanticChecker(CompiscriptVisitor):
             elem_type = ERROR
         loop_var = VariableSymbol(name, elem_type, tok.line, tok.column)
         loop_var.initialized = True
+        self._declared_ctx[id(ctx)] = loop_var
         self._check_block_body(ctx.block().statement(), "loop", "foreach", extra_defs=[loop_var])
         return None
 
@@ -590,6 +621,7 @@ class SemanticChecker(CompiscriptVisitor):
         tok = ctx.Identifier().getSymbol()
         catch_var = VariableSymbol(name, STRING, tok.line, tok.column)
         catch_var.initialized = True
+        self._declared_ctx[id(ctx)] = catch_var
         self._check_block_body(blocks[1].statement(), "block", "catch", extra_defs=[catch_var])
         return None
 
@@ -895,6 +927,10 @@ class SemanticChecker(CompiscriptVisitor):
                 current = self._check_index_suffix(current, suf)
             elif isinstance(suf, CompiscriptParser.PropertyAccessExprContext):
                 current = self._check_property_access_suffix(current, suf)
+            # Anotación para la fase de generación de código intermedio
+            # (ver ir/generator.py): cada sufijo queda con el tipo y el
+            # referente (símbolo) resueltos hasta ese punto de la cadena.
+            suf.tac_tipo, suf.tac_ref = current
         return current[0]
 
     def visitIdentifierExpr(self, ctx):
@@ -929,7 +965,7 @@ class SemanticChecker(CompiscriptVisitor):
         ctor = sym.find_constructor()
         expected = ctor.param_types if ctor is not None else []
         self._check_arguments(expected, arg_types, args, ctx, callee_desc=f"el constructor de '{name}'")
-        return (ClassType(name, sym), None)
+        return (ClassType(name, sym), ctor)
 
     def visitThisExpr(self, ctx):
         cscope = self.symtab.current.enclosing_class_scope()

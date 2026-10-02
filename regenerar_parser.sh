@@ -8,13 +8,6 @@
 #
 # Requisitos: Java (JRE 11 o superior) instalado y en el PATH.
 #
-# Nota de versiones: este proyecto se generó y probó con ANTLR 4.11.1
-# (antlr4-python3-runtime==4.11.1 en requirements.txt). `antlr4-tools`
-# descarga la última versión de ANTLR disponible, que puede no coincidir.
-# Si al regenerar el parser aparecen errores de versión al ejecutar la
-# aplicación, instala el runtime de Python que corresponda a la versión
-# de ANTLR que se haya usado para generar los archivos, p. ej.:
-#   pip install antlr4-python3-runtime==<version-usada-por-antlr4-tools>
 # ---------------------------------------------------------------------
 set -e
 
