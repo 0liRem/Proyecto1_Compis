@@ -9,8 +9,7 @@ errores encontrados —con línea, columna, símbolo y una descripción clara
 en español— sin detenerse en el primer error, y permite visualizar el
 árbol sintáctico de forma gráfica.
 
-Además genera **código intermedio (TAC)** y **código MIPS** ejecutable desde
-el propio IDE (ver [docs/GENERACION_MIPS.md](docs/GENERACION_MIPS.md)).
+
 
 ---
 
