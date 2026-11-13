@@ -62,15 +62,6 @@ class SemanticChecker(CompiscriptVisitor):
         self._run_statements(statements)
         return self.errors
 
-    # ------------------------------------------------------------------
-    # Instrumentación para la fase de generación de código intermedio
-    # ------------------------------------------------------------------
-    # El checker ya calcula, para cada nodo de expresión, su tipo (y su
-    # símbolo/referente cuando aplica) al validarlo. En vez de duplicar esa
-    # resolución de ámbitos en un segundo recorrido, se anota el resultado
-    # directamente sobre el propio nodo del árbol (`ctx.tac_tipo`,
-    # `ctx.tac_ref`) la primera vez que se visita. `ir/generator.py` sólo
-    # lee estas anotaciones — no vuelve a resolver nombres ni tipos.
     def visit(self, tree):
         resultado = super().visit(tree)
         if isinstance(tree, ParserRuleContext):

@@ -8,9 +8,12 @@
 
 """
 
+import json
 import os
+import queue
 import sys
 import tempfile
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import ttkbootstrap as tb
@@ -25,6 +28,8 @@ for _p in (_THIS_DIR, _GENERATED_DIR):
 from analyzer import analizar_texto  # noqa: E402
 from CompiscriptParser import CompiscriptParser  # noqa: E402
 from semantic.tree_view import export_tree_image  # noqa: E402
+from codegen.runner import ejecutar, simuladores_disponibles  # noqa: E402
+from codegen.activation_tree import trazar, export_activation_image  # noqa: E402
 from semantic.symbols import VariableSymbol, FunctionSymbol, ClassSymbol  # noqa: E402
 
 try:
@@ -34,7 +39,8 @@ except Exception:  # noqa: BLE001
     _PIL_OK = False
 
 
-APP_TITLE = "Analizador de Compiscript — Léxico, Sintáctico y Semántico"
+APP_TITLE = "Compilador de Compiscript — Análisis, código intermedio y MIPS"
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".compiscript_ide.json")
 
 
 class CompiscriptGUI(tb.Window):
@@ -46,6 +52,8 @@ class CompiscriptGUI(tb.Window):
 
         self.ruta_actual = None
         self.codigo_actual = ""
+        self._resultado = None
+        self.config_sim = self._cargar_config()
 
         self._construir_layout()
 
@@ -57,7 +65,7 @@ class CompiscriptGUI(tb.Window):
         barra.pack(side=TOP, fill=X)
 
         titulo = tb.Label(
-            barra, text="Compiscript — Analizador Léxico y Sintáctico",
+            barra, text="Compiscript — Compilador",
             font=("Segoe UI", 16, "bold")
         )
         titulo.pack(side=LEFT)
@@ -101,6 +109,39 @@ class CompiscriptGUI(tb.Window):
             command=self.mostrar_codigo_intermedio, state=DISABLED
         )
         self.btn_tac.pack(side=RIGHT, padx=(8, 0))
+
+        # --- Barra de generación de código MIPS ---
+        barra2 = tb.Frame(self, padding=(12, 0, 12, 6))
+        barra2.pack(side=TOP, fill=X)
+        tb.Label(barra2, text="Código objeto (MIPS):",
+                 font=("Segoe UI", 10, "bold")).pack(side=LEFT)
+        self.btn_ejecutar = tb.Button(
+            barra2, text="▶ Compilar y ejecutar", bootstyle=SUCCESS,
+            command=self.ejecutar_programa, state=DISABLED)
+        self.btn_ejecutar.pack(side=LEFT, padx=(10, 0))
+        self.btn_mips = tb.Button(
+            barra2, text="Ver código MIPS", bootstyle=DARK,
+            command=lambda: self.nb_res.select(1), state=DISABLED)
+        self.btn_mips.pack(side=LEFT, padx=(8, 0))
+        self.btn_asm = tb.Button(
+            barra2, text="💾 Guardar .asm", bootstyle=SECONDARY,
+            command=self.guardar_asm, state=DISABLED)
+        self.btn_asm.pack(side=LEFT, padx=(8, 0))
+        self.btn_act = tb.Button(
+            barra2, text="🌳 Árbol de activación", bootstyle=INFO,
+            command=self.mostrar_arbol_activacion, state=DISABLED)
+        self.btn_act.pack(side=LEFT, padx=(8, 0))
+        self.opt_var = tk.BooleanVar(value=True)
+        tb.Checkbutton(barra2, text="Optimizar (mirilla)", variable=self.opt_var,
+                       bootstyle="round-toggle").pack(side=LEFT, padx=(16, 0))
+        tb.Label(barra2, text="Simulador:").pack(side=LEFT, padx=(16, 4))
+        self.sim_var = tk.StringVar(value="Automático")
+        self.sim_combo = tb.Combobox(barra2, textvariable=self.sim_var,
+                                     state="readonly", width=34)
+        self.sim_combo.pack(side=LEFT)
+        tb.Button(barra2, text="Buscar MARS/SPIM…", bootstyle=(LINK),
+                  command=self.configurar_simulador).pack(side=LEFT, padx=(6, 0))
+        self._refrescar_simuladores()
 
         self.lbl_archivo = tb.Label(
             self, text="Ningún archivo seleccionado.", padding=(12, 0),
@@ -159,8 +200,24 @@ class CompiscriptGUI(tb.Window):
         )
         self.lbl_resumen.pack(side=RIGHT)
 
+        self.nb_res = tb.Notebook(panel_resultados)
+        self.nb_res.pack(side=TOP, fill=BOTH, expand=YES)
+        tab_errores = tb.Frame(self.nb_res, padding=4)
+        tab_mips = tb.Frame(self.nb_res, padding=4)
+        tab_exec = tb.Frame(self.nb_res, padding=4)
+        self.nb_res.add(tab_errores, text="  Errores  ")
+        self.nb_res.add(tab_mips, text="  Código MIPS  ")
+        self.nb_res.add(tab_exec, text="  Ejecución  ")
+        self.txt_mips = self._caja_texto(tab_mips)
+        self.txt_mips.tag_configure("comentario", foreground="#7a8794")
+        self.txt_mips.tag_configure("etiqueta", foreground="#0b5ed7", font=("Consolas", 10, "bold"))
+        self.txt_mips.tag_configure("directiva", foreground="#7b3fb3")
+        self.txt_exec = self._caja_texto(tab_exec, fondo="#0f1720", frente="#d7e3ee")
+        self.txt_exec.tag_configure("info", foreground="#8bd17c")
+        self.txt_exec.tag_configure("error", foreground="#ff8f8f")
+
         # Filtro por tipo de error
-        filtro_frame = tb.Frame(panel_resultados)
+        filtro_frame = tb.Frame(tab_errores)
         filtro_frame.pack(side=TOP, fill=X, pady=(0, 6))
         tb.Label(filtro_frame, text="Mostrar:").pack(side=LEFT, padx=(0, 6))
         self.filtro_var = tk.StringVar(value="Todos")
@@ -174,7 +231,7 @@ class CompiscriptGUI(tb.Window):
         # Tabla de errores
         columnas = ("tipo", "linea", "columna", "simbolo", "descripcion")
         self.tabla = tb.Treeview(
-            panel_resultados, columns=columnas, show="headings",
+            tab_errores, columns=columnas, show="headings",
             bootstyle=INFO, height=18
         )
         self.tabla.heading("tipo", text="Tipo")
@@ -193,7 +250,7 @@ class CompiscriptGUI(tb.Window):
         self.tabla.tag_configure("Sintáctico", foreground="#b02a37")
         self.tabla.tag_configure("Semántico", foreground="#5a3d9e")
 
-        scroll_tabla = tb.Scrollbar(panel_resultados, orient=VERTICAL, command=self.tabla.yview)
+        scroll_tabla = tb.Scrollbar(tab_errores, orient=VERTICAL, command=self.tabla.yview)
         self.tabla.configure(yscrollcommand=scroll_tabla.set)
 
         self.tabla.pack(side=LEFT, fill=BOTH, expand=YES)
@@ -242,6 +299,7 @@ class CompiscriptGUI(tb.Window):
         self.btn_arbol.configure(state=DISABLED)
         self.btn_simbolos.configure(state=DISABLED)
         self.btn_tac.configure(state=DISABLED)
+        self._reset_backend()
         self._errores = []
         self._resultado = None
         self._refrescar_tabla()
@@ -293,6 +351,7 @@ class CompiscriptGUI(tb.Window):
         self.btn_arbol.configure(state=DISABLED)
         self.btn_simbolos.configure(state=DISABLED)
         self.btn_tac.configure(state=DISABLED)
+        self._reset_backend()
         self._errores = []
         self._resultado = None
         self._refrescar_tabla()
@@ -305,7 +364,8 @@ class CompiscriptGUI(tb.Window):
         self.update_idletasks()
 
         try:
-            resultado = analizar_texto(codigo, self.ruta_actual or "<sin nombre>")
+            resultado = analizar_texto(codigo, self.ruta_actual or "<sin nombre>",
+                                       optimizar=self.opt_var.get())
         except Exception as ex:
             messagebox.showerror(
                 "Error inesperado",
@@ -319,6 +379,7 @@ class CompiscriptGUI(tb.Window):
         self.btn_arbol.configure(state=NORMAL if resultado.arbol is not None else DISABLED)
         self.btn_simbolos.configure(state=NORMAL if resultado.tabla_simbolos is not None else DISABLED)
         self.btn_tac.configure(state=NORMAL if resultado.codigo_intermedio is not None else DISABLED)
+        self._actualizar_backend(resultado)
         self._refrescar_tabla()
         self._resaltar_lineas_con_error()
 
@@ -527,6 +588,162 @@ class CompiscriptGUI(tb.Window):
         pestana("  Código de tres direcciones  ", resultado.codigo_intermedio.to_text())
         pestana("  Direcciones y registros de activación  ", resultado.reporte_activacion.to_text())
 
+    # ------------------------------------------------------------------
+    # Generación de código MIPS y ejecución
+    # ------------------------------------------------------------------
+    def _cargar_config(self):
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _guardar_config(self):
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.config_sim, f)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _caja_texto(self, padre, fondo="#ffffff", frente="#212529"):
+        caja = tk.Text(padre, wrap="none", font=("Consolas", 10),
+                       background=fondo, foreground=frente, state=DISABLED)
+        sy = tb.Scrollbar(padre, orient=VERTICAL, command=caja.yview)
+        sx = tb.Scrollbar(padre, orient=HORIZONTAL, command=caja.xview)
+        caja.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        sy.pack(side=RIGHT, fill=Y)
+        sx.pack(side=BOTTOM, fill=X)
+        caja.pack(side=LEFT, fill=BOTH, expand=YES)
+        return caja
+
+    def _set_texto(self, caja, texto, tag=None):
+        caja.configure(state=NORMAL)
+        caja.delete("1.0", "end")
+        if texto:
+            caja.insert("1.0", texto, tag) if tag else caja.insert("1.0", texto)
+        caja.configure(state=DISABLED)
+
+    def _append(self, caja, texto, tag=None):
+        caja.configure(state=NORMAL)
+        caja.insert("end", texto, tag) if tag else caja.insert("end", texto)
+        caja.configure(state=DISABLED)
+        caja.see("end")
+
+    def _refrescar_simuladores(self):
+        disp = simuladores_disponibles(self.config_sim)
+        self._sim_map = {"Automático": "auto"}
+        for k, desc in disp.items():
+            self._sim_map[desc] = k
+        self.sim_combo.configure(values=list(self._sim_map))
+        if self.sim_var.get() not in self._sim_map:
+            self.sim_var.set("Automático")
+
+    def configurar_simulador(self):
+        ruta = filedialog.askopenfilename(
+            title="Selecciona Mars (.jar) o spim (ejecutable)",
+            filetypes=[("MARS / SPIM", "*.jar *.exe spim"), ("Todos los archivos", "*.*")])
+        if not ruta:
+            return
+        clave = "mars" if ruta.lower().endswith(".jar") else "spim"
+        self.config_sim[clave] = ruta
+        self._guardar_config()
+        self._refrescar_simuladores()
+        self.status.configure(text=f"Simulador configurado: {ruta}")
+
+    def _reset_backend(self):
+        self.btn_ejecutar.configure(state=NORMAL)
+        self.btn_mips.configure(state=DISABLED)
+        self.btn_asm.configure(state=DISABLED)
+        self.btn_act.configure(state=DISABLED)
+        self._set_texto(self.txt_mips, "")
+        self._set_texto(self.txt_exec, "")
+
+    def _actualizar_backend(self, resultado):
+        mips = resultado.codigo_mips
+        if mips is None:
+            msg = resultado.error_mips or (
+                "El código MIPS sólo se genera cuando el programa no tiene "
+                "errores léxicos, sintácticos ni semánticos.")
+            self._set_texto(self.txt_mips, msg)
+            self.btn_mips.configure(state=DISABLED)
+            self.btn_asm.configure(state=DISABLED)
+            self.btn_act.configure(state=DISABLED)
+            return
+        caja = self.txt_mips
+        caja.configure(state=NORMAL)
+        caja.delete("1.0", "end")
+        for ln in mips.texto.splitlines():
+            t = ln.strip()
+            tag = None
+            if t.startswith("#"):
+                tag = "comentario"
+            elif t.endswith(":") or (t and not ln.startswith(" ") and ":" in t.split("#")[0]):
+                tag = "etiqueta"
+            elif t.startswith("."):
+                tag = "directiva"
+            caja.insert("end", ln + "\n", tag) if tag else caja.insert("end", ln + "\n")
+        caja.configure(state=DISABLED)
+        self.btn_mips.configure(state=NORMAL)
+        self.btn_asm.configure(state=NORMAL)
+        self.btn_act.configure(state=NORMAL)
+        if mips.optimizacion is not None:
+            self.status.configure(text=mips.optimizacion.resumen())
+
+    def guardar_asm(self):
+        mips = getattr(self._resultado, "codigo_mips", None)
+        if mips is None:
+            return
+        base = os.path.splitext(os.path.basename(self.ruta_actual))[0] if self.ruta_actual else "programa"
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar ensamblador MIPS", defaultextension=".asm", initialfile=base + ".asm",
+            filetypes=[("Ensamblador MIPS", "*.asm *.s"), ("Todos los archivos", "*.*")])
+        if not ruta:
+            return
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(mips.texto)
+        self.status.configure(text=f"Ensamblador guardado en {ruta}")
+
+    def ejecutar_programa(self):
+        """Analiza, genera MIPS y lo ejecuta en el simulador elegido."""
+        self.analizar()
+        r = self._resultado
+        if r is None:
+            return
+        if r.codigo_mips is None:
+            self.nb_res.select(0)
+            if r.error_mips:
+                messagebox.showerror("No se pudo generar el código MIPS", r.error_mips)
+            else:
+                self.status.configure(text="Corrige los errores antes de ejecutar.")
+            return
+        sim = self._sim_map.get(self.sim_var.get(), "auto")
+        self.nb_res.select(2)
+        self._set_texto(self.txt_exec, "Ejecutando…\n", "info")
+        self.btn_ejecutar.configure(state=DISABLED)
+        cola = queue.Queue()
+        asm, cfg = r.codigo_mips.texto, dict(self.config_sim)
+        threading.Thread(target=lambda: cola.put(ejecutar(asm, sim, config=cfg)),
+                         daemon=True).start()
+        self.after(100, lambda: self._esperar_ejecucion(cola))
+
+    def _esperar_ejecucion(self, cola):
+        try:
+            res = cola.get_nowait()
+        except queue.Empty:
+            self.after(100, lambda: self._esperar_ejecucion(cola))
+            return
+        self.btn_ejecutar.configure(state=NORMAL)
+        self._set_texto(self.txt_exec, res.salida)
+        pie = f"[{res.simulador}] {res.duracion:.2f} s"
+        if res.pasos:
+            pie += f", {res.pasos} instrucciones"
+        if res.ok:
+            self._append(self.txt_exec, f"\n— Programa finalizado ({pie}) —\n", "info")
+            self.status.configure(text=f"Ejecución terminada en {res.simulador}.")
+        else:
+            self._append(self.txt_exec, f"\n— Error de ejecución ({pie}): {res.error}\n", "error")
+            self.status.configure(text="La ejecución terminó con errores.")
+
     def mostrar_arbol(self):
         if not getattr(self, "_resultado", None) or self._resultado.arbol is None:
             messagebox.showinfo(
@@ -561,9 +778,13 @@ class CompiscriptGUI(tb.Window):
             self.status.configure(text="No se pudo generar el árbol.")
             return
 
+        self._mostrar_imagen(ruta_png, "Árbol sintáctico")
+        self.status.configure(text="Árbol sintáctico generado.")
+
+    def _mostrar_imagen(self, ruta_png, titulo):
         imagen = Image.open(ruta_png)
         ventana = tk.Toplevel(self)
-        ventana.title("Árbol sintáctico")
+        ventana.title(titulo)
         ventana.geometry("1000x700")
 
         contenedor = tb.Frame(ventana)
@@ -583,7 +804,36 @@ class CompiscriptGUI(tb.Window):
         canvas.image = foto  # evita que el garbage collector la elimine
         canvas.configure(scrollregion=(0, 0, imagen.width, imagen.height))
 
-        self.status.configure(text="Árbol sintáctico generado.")
+    def mostrar_arbol_activacion(self):
+        """Ejecuta el programa observando las llamadas y dibuja el árbol de activación."""
+        mips = getattr(self._resultado, "codigo_mips", None)
+        if mips is None:
+            return
+        self.status.configure(text="Ejecutando el programa para trazar las llamadas…")
+        self.update_idletasks()
+        arbol = trazar(mips)
+        base = os.path.basename(self.ruta_actual or "<sin nombre>")
+        if arbol.raiz is None or not _PIL_OK:
+            self.nb_res.select(2)
+            self._set_texto(self.txt_exec, arbol.to_text() + "\n")
+            return
+        try:
+            tmp_base = os.path.join(tempfile.gettempdir(), "compiscript_activacion")
+            ruta_png = export_activation_image(
+                arbol, tmp_base, formato="png", titulo=f"Árbol de activación — {base}")
+        except Exception as ex:  # noqa: BLE001
+            self.nb_res.select(2)
+            self._set_texto(self.txt_exec, arbol.to_text() + "\n")
+            messagebox.showwarning(
+                "No se pudo dibujar el árbol",
+                f"No se pudo generar la imagen (¿está instalado Graphviz?).\n\n{ex}\n\n"
+                "Se muestra el árbol en texto en la pestaña Ejecución.")
+            return
+        self._mostrar_imagen(ruta_png, "Árbol de activación")
+        msg = "Árbol de activación generado"
+        if arbol.error:
+            msg += f" (la ejecución terminó con error: {arbol.error})"
+        self.status.configure(text=msg + ".")
 
     def _on_seleccionar_error(self, event=None):
         seleccion = self.tabla.selection()

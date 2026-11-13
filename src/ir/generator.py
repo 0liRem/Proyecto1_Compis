@@ -3,16 +3,21 @@
 Generador de código intermedio 
 """
 
+import re
+
 from CompiscriptParser import CompiscriptParser
 from semantic.checker import SemanticChecker
 from semantic.symbols import VariableSymbol, FunctionSymbol
-from semantic.types import INTEGER, FLOAT, VOID
+from semantic.types import INTEGER, FLOAT, VOID, BOOLEAN, STRING, NULL
 
 from ir.tac import ProgramaTAC
 from ir.temp_manager import TempManager
 from ir.activation import build_activation_records, ampliar_marco_con_temporales, WORD_SIZE
 
 _ops_entre = SemanticChecker._operators_between
+_RE_INT = re.compile(r"^-?\d+$")
+_RE_FLT = re.compile(r"^-?\d+\.\d+$")
+_COMPARACIONES = ("==", "!=", "<", "<=", ">", ">=")
 
 
 class TACGenerator:
@@ -24,6 +29,7 @@ class TACGenerator:
         self._break_stack = []
         self._continue_stack = []
         self.reporte_activacion = None
+        self._tt = {}   # nombre de temporal/variable -> Type (para anotar el TAC con tipos)
 
 
     def generate(self, tree):
@@ -62,31 +68,87 @@ class TACGenerator:
         self.funcion_actual = None
 
 
-    @staticmethod
-    def _nombre(sym):
+    def _nombre(self, sym):
         if isinstance(sym, FunctionSymbol):
             return sym.tac_label
-        return getattr(sym, "tac_name", sym.name)
+        nombre = getattr(sym, "tac_name", sym.name)
+        tipo = getattr(sym, "type", None)
+        if tipo is not None:
+            self._tt[nombre] = tipo
+        return nombre
+
+    # --- tipos de operandos (los usa el backend MIPS) ---
+    def _nuevo(self, tipo=None):
+        t = self.temps.nuevo()
+        self._tt[t] = tipo
+        return t
+
+    def _tipo_op(self, x):
+        if not isinstance(x, str):
+            return None
+        if x.startswith('"'):
+            return STRING
+        if _RE_FLT.match(x):
+            return FLOAT
+        if _RE_INT.match(x):
+            return INTEGER
+        if x == "null":
+            return NULL
+        return self._tt.get(x)
+
+    @staticmethod
+    def _code(tipo):
+        if tipo is None:
+            return "int"
+        if tipo == FLOAT:
+            return "float"
+        if tipo == STRING:
+            return "string"
+        if tipo == BOOLEAN:
+            return "bool"
+        if tipo == INTEGER:
+            return "int"
+        return "ref"
+
+    @staticmethod
+    def _campo(tipo_obj, nombre):
+        """Símbolo del atributo `nombre` en la clase `tipo_obj` (o None)."""
+        cls = getattr(tipo_obj, "symbol", None)
+        if cls is None:
+            return None
+        return cls.find_field(nombre)
 
     def _coerce(self, operando, origen, destino):
         if origen == INTEGER and destino == FLOAT and not origen.is_error():
-            t = self.temps.nuevo()
+            t = self._nuevo(FLOAT)
             self.tac.emit("itof", args=(operando,), dest=t)
             self.temps.liberar(operando)
             return t
         return operando
 
-    def _binario(self, op, izq, t_izq, der, t_der, linea=0):
-        if t_izq == FLOAT and t_der == INTEGER:
+    def _binario(self, op, izq, der, linea=0):
+        ti, td = self._tipo_op(izq), self._tipo_op(der)
+        if ti == FLOAT and td == INTEGER:
             der = self._coerce(der, INTEGER, FLOAT)
-        elif t_der == FLOAT and t_izq == INTEGER:
+            td = FLOAT
+        elif td == FLOAT and ti == INTEGER:
             izq = self._coerce(izq, INTEGER, FLOAT)
-        t = self.temps.nuevo()
-        self.tac.emit(op, args=(izq, der), dest=t, linea=linea)
+            ti = FLOAT
+        if ti == FLOAT or td == FLOAT:
+            opt = FLOAT
+        elif ti == NULL or td == NULL:
+            opt = NULL
+        else:
+            opt = ti if ti is not None else td
+        if op in _COMPARACIONES:
+            res_t = BOOLEAN
+        else:
+            res_t = FLOAT if opt == FLOAT else (STRING if opt == STRING else INTEGER)
+        t = self._nuevo(res_t)
+        self.tac.emit(op, args=(izq, der), dest=t, linea=linea, tipo=self._code(opt))
         self.temps.liberar(izq)
         self.temps.liberar(der)
         return t
-
 
 
     def emit_statement(self, ctx):
@@ -104,7 +166,7 @@ class TACGenerator:
             return None
         if ctx.printStatement() is not None:
             valor = self.emit_expression(ctx.printStatement().expression())
-            self.tac.emit("print", args=(valor,))
+            self.tac.emit("print", args=(valor,), tipo=self._code(self._tipo_op(valor)))
             self.temps.liberar(valor)
             return None
         if ctx.block() is not None:
@@ -166,7 +228,11 @@ class TACGenerator:
             obj = self.emit_expression(exprs[0])
             prop = ctx.Identifier().getText()
             valor = self.emit_expression(exprs[1])
-            self.tac.emit("field_store", args=(obj, prop, valor), linea=ctx.start.line)
+            campo = self._campo(exprs[0].tac_tipo, prop)
+            if campo is not None:
+                valor = self._coerce(valor, exprs[1].tac_tipo, campo.type)
+            self.tac.emit("field_store", args=(obj, prop, valor), linea=ctx.start.line,
+                          extra=getattr(campo, "tac_offset", None))
             self.temps.liberar(obj)
             self.temps.liberar(valor)
 
@@ -256,16 +322,16 @@ class TACGenerator:
     def emit_foreach(self, ctx):
         base = self.emit_expression(ctx.expression())
         var = self._nombre(self.checker.get_declared_symbol(ctx))
-        idx = self.temps.nuevo()
+        idx = self._nuevo(INTEGER)
         self.tac.emit("=", args=("0",), dest=idx)
-        n = self.temps.nuevo()
+        n = self._nuevo(INTEGER)
         self.tac.emit("array_len", args=(base,), dest=n)
         l_cond = self.tac.nueva_etiqueta()
         l_update = self.tac.nueva_etiqueta()
         l_fin = self.tac.nueva_etiqueta()
         self.tac.emit_label(l_cond)
-        cmp = self.temps.nuevo()
-        self.tac.emit("<", args=(idx, n), dest=cmp)
+        cmp = self._nuevo(BOOLEAN)
+        self.tac.emit("<", args=(idx, n), dest=cmp, tipo="int")
         self.tac.emit("if_false", args=(cmp,), dest=l_fin)
         self.temps.liberar(cmp)
         self.tac.emit("array_load", args=(base, idx), dest=var)
@@ -275,8 +341,8 @@ class TACGenerator:
         self._break_stack.pop()
         self._continue_stack.pop()
         self.tac.emit_label(l_update)
-        sig = self.temps.nuevo()
-        self.tac.emit("+", args=(idx, "1"), dest=sig)
+        sig = self._nuevo(INTEGER)
+        self.tac.emit("+", args=(idx, "1"), dest=sig, tipo="int")
         self.tac.emit("=", args=(sig,), dest=idx)
         self.temps.liberar(sig)
         self.tac.emit("goto", dest=l_cond)
@@ -286,11 +352,14 @@ class TACGenerator:
 
     def emit_try_catch(self, ctx):
         blocks = ctx.block()
+        l_fin = self.tac.nueva_etiqueta()
         self.tac.emit("comment", args=("try",))
         self.emit_block(blocks[0])
+        self.tac.emit("goto", dest=l_fin)   # sin excepción se salta el catch
         var = self._nombre(self.checker.get_declared_symbol(ctx))
         self.tac.emit("comment", args=(f"catch ({var})",))
         self.emit_block(blocks[1])
+        self.tac.emit_label(l_fin)
         self.tac.emit("comment", args=("fin try/catch",))
 
     def emit_switch(self, ctx):
@@ -302,8 +371,9 @@ class TACGenerator:
         self._break_stack.append(l_fin)
         for i, caso in enumerate(casos):
             v = self.emit_expression(caso.expression())
-            cmp = self.temps.nuevo()
-            self.tac.emit("==", args=(valor, v), dest=cmp)
+            cmp = self._nuevo(BOOLEAN)
+            self.tac.emit("==", args=(valor, v), dest=cmp,
+                          tipo=self._code(self._tipo_op(valor)))
             self.tac.emit("if_true", args=(cmp,), dest=etiquetas[i])
             self.temps.liberar(cmp)
             self.temps.liberar(v)
@@ -348,7 +418,12 @@ class TACGenerator:
         if isinstance(ctx, CompiscriptParser.PropertyAssignExprContext):
             obj = self.emit_left_hand_side(ctx.leftHandSide())
             valor = self.emit_assignment_expr(ctx.assignmentExpr())
-            self.tac.emit("field_store", args=(obj, ctx.Identifier().getText(), valor))
+            prop = ctx.Identifier().getText()
+            campo = self._campo(getattr(ctx.leftHandSide(), "tac_tipo", None), prop)
+            if campo is not None:
+                valor = self._coerce(valor, getattr(ctx.assignmentExpr(), "tac_tipo", None), campo.type)
+            self.tac.emit("field_store", args=(obj, prop, valor),
+                          extra=getattr(campo, "tac_offset", None))
             self.temps.liberar(obj)
             return valor
         return self.emit_conditional(ctx.conditionalExpr())
@@ -373,10 +448,11 @@ class TACGenerator:
         cond = self.emit_logical_or(ctx.logicalOrExpr())
         l_else = self.tac.nueva_etiqueta()
         l_end = self.tac.nueva_etiqueta()
-        res = self.temps.nuevo()
+        res = self._nuevo()
         self.tac.emit("if_false", args=(cond,), dest=l_else)
         self.temps.liberar(cond)
         v1 = self.emit_expression(exprs[0])
+        self._tt[res] = self._tipo_op(v1)
         self.tac.emit("=", args=(v1,), dest=res)
         self.temps.liberar(v1)
         self.tac.emit("goto", dest=l_end)
@@ -388,7 +464,7 @@ class TACGenerator:
         return res
 
     def _short_circuit(self, izq, der_ctx, op, siguiente):
-        t = self.temps.nuevo()
+        t = self._nuevo(BOOLEAN)
         l_corto = self.tac.nueva_etiqueta()
         l_fin = self.tac.nueva_etiqueta()
         self.tac.emit("if_false" if op == "&&" else "if_true", args=(izq,), dest=l_corto)
@@ -419,17 +495,9 @@ class TACGenerator:
     def _cadena_binaria(self, ctx, subs, siguiente):
         ops = _ops_entre(ctx)
         res = siguiente(subs[0])
-        t_res = subs[0].tac_tipo if hasattr(subs[0], "tac_tipo") else None
         for i, op in enumerate(ops):
             der = siguiente(subs[i + 1])
-            t_der = getattr(subs[i + 1], "tac_tipo", None)
-            res = self._binario(op, res, t_res, der, t_der, linea=subs[i + 1].start.line)
-            # tipo del resultado acumulado: el que el checker anotó no
-            # existe para resultados parciales; se aproxima por promoción
-            if op in ("==", "!=", "<", "<=", ">", ">="):
-                t_res = None
-            elif t_res == FLOAT or t_der == FLOAT:
-                t_res = FLOAT
+            res = self._binario(op, res, der, linea=subs[i + 1].start.line)
         return res
 
     def emit_equality(self, ctx):
@@ -448,8 +516,9 @@ class TACGenerator:
         if ctx.unaryExpr() is not None:
             op = ctx.getChild(0).getText()
             v = self.emit_unary(ctx.unaryExpr())
-            t = self.temps.nuevo()
-            self.tac.emit("not" if op == "!" else "uminus", args=(v,), dest=t)
+            t = self._nuevo(BOOLEAN if op == "!" else self._tipo_op(v))
+            self.tac.emit("not" if op == "!" else "uminus", args=(v,), dest=t,
+                          tipo=self._code(self._tipo_op(v)))
             self.temps.liberar(v)
             return t
         return self.emit_primary(ctx.primaryExpr())
@@ -475,7 +544,7 @@ class TACGenerator:
 
     def emit_array_literal(self, ctx):
         exprs = ctx.expression()
-        t = self.temps.nuevo()
+        t = self._nuevo(getattr(ctx, "tac_tipo", None))
         self.tac.emit("array_new", args=(len(exprs),), dest=t)
         for i, e in enumerate(exprs):
             v = self.emit_expression(e)
@@ -500,17 +569,18 @@ class TACGenerator:
             nombre = self._nombre(sym) if sym is not None else ctx.Identifier().getText()
             dueno = getattr(sym, "tac_owner_function", None)
             if isinstance(sym, VariableSymbol) and dueno is not None and dueno is not self.funcion_actual:
-                t = self.temps.nuevo()
+                t = self._nuevo(ctx.tac_tipo)
                 self.tac.emit("noloc", args=(nombre, dueno.tac_label), dest=t)
                 return t, ctx.tac_tipo, sym
             return nombre, ctx.tac_tipo, sym
         if isinstance(ctx, CompiscriptParser.NewExprContext):
             return self._new(ctx)
+        self._tt["this"] = ctx.tac_tipo
         return "this", ctx.tac_tipo, None  # ThisExpr
 
     def _new(self, ctx):
         ctor = ctx.tac_ref
-        t_obj = self.temps.nuevo()
+        t_obj = self._nuevo(ctx.tac_tipo)
         self.tac.emit("obj_new", args=(ctx.Identifier().getText(),), dest=t_obj)
         args_ctx = ctx.arguments()
         exprs = args_ctx.expression() if args_ctx is not None else []
@@ -530,7 +600,7 @@ class TACGenerator:
             return self._call(operando, ref, suf)
         if isinstance(suf, CompiscriptParser.IndexExprContext):
             idx = self.emit_expression(suf.expression())
-            t = self.temps.nuevo()
+            t = self._nuevo(suf.tac_tipo)
             self.tac.emit("array_load", args=(operando, idx), dest=t)
             self.temps.liberar(operando)
             self.temps.liberar(idx)
@@ -538,8 +608,9 @@ class TACGenerator:
         # PropertyAccessExpr
         if isinstance(suf.tac_ref, FunctionSymbol):
             return operando, suf.tac_tipo, suf.tac_ref  # método
-        t = self.temps.nuevo()
-        self.tac.emit("field_load", args=(operando, suf.Identifier().getText()), dest=t)
+        t = self._nuevo(suf.tac_tipo)
+        self.tac.emit("field_load", args=(operando, suf.Identifier().getText()), dest=t,
+                      extra=getattr(suf.tac_ref, "tac_offset", None))
         self.temps.liberar(operando)
         return t, suf.tac_tipo, suf.tac_ref
 
@@ -553,7 +624,7 @@ class TACGenerator:
             self.tac.emit("param", args=(operando,))
         for v in valores:
             self.tac.emit("param", args=(v,))
-        t = self.temps.nuevo() if ref.return_type != VOID else None
+        t = self._nuevo(ref.return_type) if ref.return_type != VOID else None
         self.tac.emit("call", args=(ref.tac_label, len(valores) + (1 if es_metodo else 0)),
                       dest=t, linea=suf.start.line)
         for v in valores:

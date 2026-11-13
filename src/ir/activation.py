@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Registros de activación y direccionamiento en tiempo de ejecución.
 
@@ -101,7 +100,7 @@ def build_activation_records(checker) -> ActivationReport:
             procesar_funcion(m, owner_class=cls_sym)
         return offset, campos
 
-    def procesar_funcion(fsym, owner_class=None, prefijo_label=None):
+    def procesar_funcion(fsym, owner_class=None, prefijo_label=None, heredados=None):
         prefijo_label = prefijo_label or []
         if owner_class is not None:
             fsym.tac_label = f"{owner_class.name}_{fsym.name}"
@@ -110,8 +109,13 @@ def build_activation_records(checker) -> ActivationReport:
         else:
             fsym.tac_label = fsym.name
 
+        # Función léxicamente padre (para el enlace estático del backend MIPS).
+        fsym.tac_parent_label = prefijo_label[-1] if (prefijo_label and owner_class is None) else None
+
         filas = []
-        usados = set()
+        # Los nombres ya usados por globales y por funciones externas se heredan,
+        # de modo que un nombre TAC identifica una sola variable visible.
+        usados = set(heredados) if heredados is not None else set(usados_globales)
         base_param = 0
         if owner_class is not None:
             filas.append(("this", "param", 0, owner_class.name))
@@ -147,7 +151,7 @@ def build_activation_records(checker) -> ActivationReport:
         reporte.funciones.append((fsym, filas))
 
         for nf in funciones_anidadas:
-            procesar_funcion(nf, prefijo_label=prefijo_label + [fsym.tac_label])
+            procesar_funcion(nf, prefijo_label=prefijo_label + [fsym.tac_label], heredados=usados)
         for nc in clases_anidadas:
             procesar_clase(nc)
 

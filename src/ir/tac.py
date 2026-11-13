@@ -1,7 +1,7 @@
 
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 
 @dataclass
@@ -10,6 +10,9 @@ class Instruccion:
     args: tuple = ()
     dest: Optional[str] = None
     linea: int = 0  # trazabilidad
+    # Metadatos para el generador de MIPS (no se imprimen en el TAC):
+    tipo: Optional[str] = None   # tipo de los operandos: int | float | bool | string | ref
+    extra: Any = None            # p. ej. desplazamiento (bytes) de un atributo
     def __str__(self):
         a = self.args
         op = self.op
@@ -87,8 +90,8 @@ class ProgramaTAC:
         self._contador_etiquetas += 1
         return etiqueta
 
-    def emit(self, op, args=(), dest=None, linea=0):
-        instr = Instruccion(op, tuple(args), dest, linea=linea)
+    def emit(self, op, args=(), dest=None, linea=0, tipo=None, extra=None):
+        instr = Instruccion(op, tuple(args), dest, linea=linea, tipo=tipo, extra=extra)
         self.instrucciones.append(instr)
         return instr
 

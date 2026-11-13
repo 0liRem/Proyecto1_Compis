@@ -26,19 +26,23 @@ from error_handling import (
 )
 from semantic.checker import analizar_semantica  
 from ir.generator import generar_tac  # noqa: E402
+from codegen import generar_mips, CodegenError  # noqa: E402
 
 
 class ResultadoAnalisis:
     #Compscript
 
     def __init__(self, nombre_archivo, errores, arbol=None, tabla_simbolos=None,
-                 codigo_intermedio=None, reporte_activacion=None):
+                 codigo_intermedio=None, reporte_activacion=None,
+                 codigo_mips=None, error_mips=None):
         self.nombre_archivo = nombre_archivo
         
         self.errores = sorted(errores, key=lambda e: (e.linea, e.columna))
         self.arbol = arbol
         self.codigo_intermedio = codigo_intermedio    # ProgramaTAC o None (sólo si no hubo errores)
         self.reporte_activacion = reporte_activacion  # ActivationReport o None
+        self.codigo_mips = codigo_mips                # ProgramaMIPS o None
+        self.error_mips = error_mips                  # texto si falló la generación de MIPS
         self.tabla_simbolos = tabla_simbolos  # Revisa si se existe la tabla de simbolos (none y sigue si explota)
 
     def tiene_errores(self):
@@ -57,7 +61,8 @@ class ResultadoAnalisis:
         return [e for e in self.errores if e.tipo == "Semántico"]
 
 
-def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoAnalisis:
+def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>", num_regs: int = 8,
+                   optimizar: bool = True) -> ResultadoAnalisis:
     
 
     input_stream = InputStream(codigo)
@@ -110,6 +115,8 @@ def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoA
     tabla_simbolos = None
     codigo_intermedio = None
     reporte_activacion = None
+    codigo_mips = None
+    error_mips = None
     if arbol is not None:
         try:
             checker = analizar_semantica(arbol)
@@ -119,6 +126,11 @@ def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoA
             # libre de errores léxicos, sintácticos y semánticos.
             if not errores:
                 codigo_intermedio, reporte_activacion = generar_tac(arbol, checker)
+                # Generación de código objeto (MIPS) a partir del TAC.
+                try:
+                    codigo_mips = generar_mips(codigo_intermedio, reporte_activacion, num_regs, optimizar)
+                except (CodegenError, RuntimeError) as ex:
+                    error_mips = str(ex)
         except RecursionError:
             errores = errores + [
                 CompiscriptError(
@@ -138,7 +150,7 @@ def analizar_texto(codigo: str, nombre_archivo: str = "<entrada>") -> ResultadoA
             ]
 
     return ResultadoAnalisis(nombre_archivo, errores, arbol, tabla_simbolos,
-                             codigo_intermedio, reporte_activacion)
+                             codigo_intermedio, reporte_activacion, codigo_mips, error_mips)
 
 
 def analizar_archivo(path: str) -> ResultadoAnalisis:

@@ -9,8 +9,8 @@ errores encontrados —con línea, columna, símbolo y una descripción clara
 en español— sin detenerse en el primer error, y permite visualizar el
 árbol sintáctico de forma gráfica.
 
-El alcance es estrictamente léxico, sintáctico y semántico: **no** se
-ejecuta el programa, ni se genera código intermedio ni código objeto.
+Además genera **código intermedio (TAC)** y **código MIPS** ejecutable desde
+el propio IDE (ver [docs/GENERACION_MIPS.md](docs/GENERACION_MIPS.md)).
 
 ---
 
@@ -304,14 +304,7 @@ generada por ANTLR).
   único error controlado, para que nunca tumbe el IDE.
 
 ---
-Referencias:
-   [ANTLR4](https://github.com/antlr/antlr4) \
-   [TTKbootstrap](https://github.com/antlr/antlr4) \
-   [Tkinter](https://docs.python.org/3/library/tkinter.html) \
-   [Graphviz](https://graphviz.org/) \
-   Claude: Reorganización de codigo, estructuración del proyecto y gramatica de los errores (la parte que los tokens se lean en idioma humano) \
-   ChatGPT: Reestructuración del readme.md \
-   Gemini: Creación de los ejemplos semanticos 
+
 
 ## Generación de código intermedio
 
@@ -401,3 +394,73 @@ clases con herencia los campos heredados van primero.
 
 El marco final = parámetros + locales + `max_live × WORD_SIZE`.
 El IDE muestra todo esto en **Código intermedio → Direcciones y registros de activación**.
+
+
+## Generación de código MIPS 
+
+## 1. Convención de registros
+
+| Registro | Uso |
+|---|---|
+| `$t0–$t7` | valores de trabajo; los reparte `getReg()` |
+| `$t8, $t9` | scratch del generador y del runtime (cadena de enlaces, límites de arreglo) |
+| `$s7` | base del área de variables globales (`__globals`) |
+| `$fp / $sp / $ra` | marco, tope de pila, retorno |
+| `$v0` | valor de retorno (los `float` viajan como palabra de 32 bits) |
+| `$a0–$a3` | argumentos de syscalls y del runtime |
+| `$f0, $f2, $f12` | aritmética y syscall de `float` (los valores viven en palabras; se pasan con `mtc1/mfc1`) |
+
+## 2. Marco de activación y secuencia de llamada
+
+```
+ alta   | enlace estático (sólo funciones anidadas) |  $fp + 8 + 4n
+        | parámetro n-1 ... parámetro 0 (this)      |  $fp + 8 + 4i
+        | $ra guardado                              |  $fp + 4
+        | $fp del llamador                          |  $fp      <- $fp
+        | locales (cada una con su ranura)          |  $fp - 4, -8, ...
+        | temporales del TAC (t0, t1, ...)          |
+ baja   +-------------------------------------------+  <- $sp
+```
+
+**Llamada** (`param ...; t = call f, n`): el llamador (1) escribe a memoria todo
+valor pendiente en registros y olvida los registros, (2) `addiu $sp,$sp,-4(n[+1])`,
+(3) guarda cada argumento, (4) si `f` es anidada guarda el enlace estático,
+(5) `jal`, (6) libera la pila y (7) toma el resultado de `$v0`.
+**Retorno:** `move $v0, valor` → `j __epi_f` → `move $sp,$fp; lw $ra; lw $fp; addiu $sp,8; jr $ra`.
+La recursión es segura porque cada activación tiene sus propias ranuras.
+
+**Funciones anidadas / clausuras (no escapan):** cada función anidada recibe como
+parámetro extra el `$fp` de su función padre. Una variable de un ancestro a *k*
+niveles se alcanza siguiendo *k* enlaces (`lw $t9, sl($fp)` ...).
+**Objetos y arreglos:** viven en el heap (`sbrk`). Arreglo = `[longitud, e0, e1, …]`
+con verificación de índice; objeto = atributos consecutivos (heredados primero).
+Cadenas: literales en `.data`, concatenación en el heap.
+
+## 3. getReg() — asignación de registros
+
+Algoritmo de descriptores por **bloque básico**:
+
+* *descriptor de registro*: qué nombres contiene cada `$t`; *descriptor de dirección*: dónde está cada nombre (registro y/o memoria).
+* `get_reg(x)`: si `x` ya está en un registro, se reutiliza (sin código); si no, se pide un registro y se carga.
+* `get_dest()`: registro para un resultado.
+* Sin registros libres: se elige víctima — primero registros **limpios** (ya están en memoria, no cuesta), y entre ellos el de **uso más lejano** (*next-use* calculado dentro del bloque); si todos están sucios se **derrama** (`sw`) el de uso más lejano.
+* Copias `x = y` no generan código (alias de registro).
+* Fin de bloque (etiqueta, salto, `return`, `call`): `flush()` escribe lo sucio y vacía los registros. Así los valores siempre están en memoria entre bloques y ante llamadas (que pueden modificar globales).
+* Los literales son pseudo‑nombres que se rematerializan (`li/la/lw`), sin memoria.
+
+Cada variable y cada temporal tienen "casa" en el marco o en el área global: se
+combinan registros (rápidos) y pila (respaldo). `--regs N` (3–8) limita el pool
+para demostrar los derrames; los resultados no cambian.
+
+---
+Referencias:
+   [ANTLR4](https://github.com/antlr/antlr4) \
+   [TTKbootstrap](https://github.com/antlr/antlr4) \
+   [Tkinter](https://docs.python.org/3/library/tkinter.html) \
+   [Graphviz](https://graphviz.org/) \
+   [MIPS](https://www.dsi.unive.it/~gasparetto/materials/MIPS_Instruction_Set.pdf)\
+   [MIPS2](https://asm-editor.specy.app/documentation/mips)\
+   Claude: Reorganización de codigo, estructuración del proyecto y gramatica de los errores (la parte que los tokens se lean en idioma humano) \
+   ChatGPT: Reestructuración del readme.md \
+   Gemini: Creación de los ejemplos semanticos \
+   Claude: Adaptación del arbol para el codigo MIPS y runner para ejecutar el codigo ensamblador
